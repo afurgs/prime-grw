@@ -1,61 +1,71 @@
-"""HTTP API server for prime-grw — remote agents interact via REST."""
+"""
+prime-grw HTTP server — remote agents interact via REST.
+
+Calls the evaluation directly (in-process), not via subprocess.
+"""
 import json
-import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from typing import Optional
 
-app = FastAPI(title="prime-grw", version="0.6.0")
 START = time.time()
 
 
-class EvalRequest(BaseModel):
-    model: str = "z-ai/glm-5.3"
-    n: int = Field(default=20, ge=1, le=200)
-    r: int = Field(default=1, ge=1, le=3)
-    task_type: Optional[str] = None
+def create_app(evaluate_fn=None):
+    """Create the FastAPI app. The evaluate_fn is the in-process evaluation function."""
+    app = FastAPI(title="prime-grw", version="0.6.0")
 
+    class EvalRequest(BaseModel):
+        model: str = "z-ai/glm-5.3"
+        n: int = Field(default=20, ge=1, le=200)
+        r: int = Field(default=1, ge=1, le=3)
+        task_type: Optional[str] = None
+        temperature: float = 0.7
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "prime-grw", "uptime": time.time() - START}
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "service": "prime-grw", "uptime": time.time() - START}
 
+    @app.get("/tasks")
+    async def tasks():
+        from prime_grw.prime_grw import PrimeGRWConfig, PrimeGRWTaskset
+        from collections import defaultdict
+        cfg = PrimeGRWConfig(id="prime-grw")
+        taskset = PrimeGRWTaskset(cfg)
+        all_tasks = taskset.load()
+        counts = defaultdict(int)
+        for t in all_tasks:
+            counts[t.data.name.split("/")[-1]] += 1
+        return {"task_types": dict(counts), "total": len(all_tasks)}
 
-@app.get("/tasks")
-async def tasks():
-    return {"task_types": {"brief": 0.10, "extraction": 0.20, "validation": 0.20,
-                            "match": 0.15, "diff": 0.15, "lifecycle": 0.20}}
+    @app.get("/probes")
+    async def probes():
+        from prime_grw.prime_grw import run_probes
+        results = run_probes()
+        return {"probes": results, "ceiling": 0.25,
+                "verdict": "PASS" if max(results.values()) < 0.25 else "FAIL"}
 
+    @app.post("/eval")
+    async def eval(req: EvalRequest):
+        """Run an evaluation synchronously (in-process, no subprocess)."""
+        if evaluate_fn is None:
+            return {"error": "evaluate_fn not configured"}
+        import asyncio
+        result = await evaluate_fn(
+            model=req.model, n=req.n, r=req.r,
+            task_type=req.task_type, temperature=req.temperature
+        )
+        return result
 
-@app.get("/probes")
-async def probes():
-    try:
-        from .prime_grw import run_probes
-        return {"probes": run_probes(), "ceiling": 0.25}
-    except Exception as e:
-        return {"error": str(e)}
+    @app.get("/", response_class=HTMLResponse)
+    async def index():
+        static = Path(__file__).parent.parent / "static" / "index.html"
+        if static.exists():
+            return static.read_text()
+        return "<h1>prime-grw</h1><p>POST /eval to run an evaluation.</p>"
 
-
-@app.post("/eval")
-async def eval(req: EvalRequest):
-    """Trigger an evaluation (runs synchronously for small n)."""
-    import asyncio
-    cmd = f"uv run vf-eval prime-grw -m {req.model} -n {req.n} -r {req.r} -c 8 --no-push"
-    if req.task_type:
-        cmd += f" --select.include.names [prime-grw/{req.task_type}]"
-    proc = await asyncio.create_subprocess_shell(cmd,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await proc.communicate()
-    return {"exit_code": proc.returncode, "output": stdout.decode()[-2000:], "error": stderr.decode()[:500] if proc.returncode else None}
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    index = Path(__file__).parent.parent / "static" / "index.html"
-    if index.exists():
-        return index.read_text()
-    return "<h1>prime-grw server</h1><p>POST /eval to run an evaluation.</p>"
+    return app

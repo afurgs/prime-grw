@@ -1,110 +1,143 @@
 """
-prime-grw CLI — standalone evaluation and serving for the GRW (Growth) operations suite.
+prime-grw — standalone evaluation suite for GRW operations tasks.
 
-Commands:
-    prime-grw eval       Run an evaluation
-    prime-grw validate   Run model-free task validation (gold + noop)
-    prime-grw probes     Run the degenerate-policy probe suite
-    prime-grw serve      Start an HTTP API server for remote agents
-    prime-grw tasks      List task types and mixture weights
+The package IS the app. No subprocess, no CLI wrapping, no Prime Agent.
+Agents interact via Python import, CLI command, or HTTP API — all in-process.
 
 Usage:
-    uv run prime-grw eval --model z-ai/glm-5.3 --n 20
-    uv run prime-grw serve --port 8300
+    prime-grw eval --model z-ai/glm-5.3 --n 20
+    prime-grw serve --port 8300
+    prime-grw probes
+    prime-grw tasks
 """
 import argparse
+import asyncio
 import json
-import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 
+# Import the taskset directly from the package
+from prime_grw.prime_grw import PrimeGRWConfig, PrimeGRWTaskset, run_probes
 
-def main():
+
+def load_tasks(n=None, task_type=None):
+    """Load tasks from the taskset."""
+    cfg = PrimeGRWConfig(id="prime-grw")
+    taskset = PrimeGRWTaskset(cfg)
+    tasks = taskset.load()
+    if task_type:
+        tasks = [t for t in tasks if t.data.name.endswith(f"/{task_type}")]
+    if n:
+        tasks = tasks[:n]
+    return tasks
+
+
+async def evaluate(model: str, n: int = 20, r: int = 1,
+                   task_type: str = None, temperature: float = 0.7) -> dict:
+    """Run evaluation in-process via verifiers v1."""
+    import verifiers.v1 as vf
+
+    tasks = load_tasks(n=n, task_type=task_type)
+    if not tasks:
+        return {"error": "no tasks found"}
+
+    agent_cfg = vf.AgentConfig(model=model, temperature=temperature)
+    results = []
+
+    async with vf.make_agent(agent_cfg) as agent:
+        for task in tasks:
+            for rollout in range(r):
+                trace = await agent.run(task)
+                reward = await task.reward(trace)
+                results.append({
+                    "task": task.data.name,
+                    "reward": reward,
+                    "stop": trace.stop_condition,
+                    "tokens": trace.num_total_tokens,
+                })
+
+    # Aggregate
+    by_task = defaultdict(list)
+    for r_ in results:
+        task_name = r_["task"].split("/")[-1]
+        by_task[task_name].append(r_["reward"])
+
+    per_task = {k: round(sum(v) / len(v), 4) for k, v in by_task.items()}
+    headline = round(sum(r["reward"] for r in results) / len(results), 4)
+
+    return {
+        "model": model,
+        "n": len(tasks),
+        "r": r,
+        "headline": headline,
+        "per_task": per_task,
+        "total_tokens": sum(r["tokens"] for r in results),
+        "n_episodes": len(results),
+    }
+
+
+def cli_main():
     parser = argparse.ArgumentParser(
         prog="prime-grw",
-        description="GRW operations evaluation suite — match, validation, diff, extraction, brief, lifecycle"
+        description="GRW operations evaluation suite — six task types, standalone."
     )
     sub = parser.add_subparsers(dest="command")
 
     # eval
-    p_eval = sub.add_parser("eval", help="Run an evaluation")
-    p_eval.add_argument("--model", "-m", required=True, help="Model ID (e.g. z-ai/glm-5.3)")
-    p_eval.add_argument("--n", type=int, default=20, help="Number of tasks (default 20)")
-    p_eval.add_argument("--r", "--rollouts", type=int, default=1, help="Rollouts per task")
-    p_eval.add_argument("--task-type", "-t", help="Filter to one task type")
-    p_eval.add_argument("--temperature", type=float, default=0.7)
-    p_eval.add_argument("--max-tokens", type=int, default=3072)
-    p_eval.add_argument("--concurrent", "-c", type=int, default=8)
-    p_eval.add_argument("--output", "-o", help="Output directory")
-
-    # validate
-    p_val = sub.add_parser("validate", help="Model-free validation (gold + noop checks)")
+    p = sub.add_parser("eval", help="Run an evaluation")
+    p.add_argument("--model", "-m", required=True)
+    p.add_argument("--n", type=int, default=20)
+    p.add_argument("--r", type=int, default=1)
+    p.add_argument("--task-type", "-t")
+    p.add_argument("--temperature", type=float, default=0.7)
 
     # probes
-    p_probes = sub.add_parser("probes", help="Run degenerate-policy probe suite")
-
-    # serve
-    p_serve = sub.add_parser("serve", help="Start HTTP API server")
-    p_serve.add_argument("--host", default="0.0.0.0")
-    p_serve.add_argument("--port", type=int, default=8300)
+    sub.add_parser("probes", help="Run degenerate-policy probes")
 
     # tasks
-    p_tasks = sub.add_parser("tasks", help="List task types")
+    sub.add_parser("tasks", help="List task types")
+
+    # serve
+    p_s = sub.add_parser("serve", help="Start HTTP API server")
+    p_s.add_argument("--host", default="0.0.0.0")
+    p_s.add_argument("--port", type=int, default=8300)
 
     args = parser.parse_args()
 
     if args.command == "eval":
-        cmd = ["uv", "run", "vf-eval", "prime-grw",
-               "--model", args.model,
-               "--num-examples", str(args.n),
-               "--rollouts-per-example", str(args.r),
-               "--max-concurrent", str(args.concurrent)]
-        if args.task_type:
-            cmd += ["--select.include.names", f"[prime-grw/{args.task_type}]"]
-        if args.output:
-            cmd += ["--output-dir", args.output]
-        print(f"Running: {' '.join(cmd)}")
-        subprocess.run(cmd)
-
-    elif args.command == "validate":
-        subprocess.run(["uv", "run", "vf-validate", "prime-grw",
-                        "--runtime.type", "subprocess"])
+        result = asyncio.run(evaluate(
+            model=args.model, n=args.n, r=args.r,
+            task_type=args.task_type, temperature=args.temperature
+        ))
+        print(json.dumps(result, indent=2))
 
     elif args.command == "probes":
-        try:
-            import prime_grw.prime_grw as pe
-            results = pe.run_probes() if hasattr(pe, 'run_probes') else {}
-            if not results:
-                # Try the probes registry
-                sys.path.insert(0, str(Path(__file__).parent))
-                from prime_grw.probes import PROBES
-                print(f"Probe registry: {list(PROBES.keys())}")
-                print("Run tier-1 via: uv run pytest tests/")
-            else:
-                print(json.dumps(results, indent=1))
-        except ImportError as e:
-            print(f"Import error: {e}")
-            print("Run probes via: uv run python -c 'from prime_grw.prime_grw import run_probes; print(run_probes())'")
-
-    elif args.command == "serve":
-        from prime_grw.server import app
-        import uvicorn
-        print(f"Starting prime-grw server on {args.host}:{args.port}")
-        uvicorn.run(app, host=args.host, port=args.port)
+        results = run_probes()
+        print(json.dumps(results, indent=1))
+        verdict = "PASS" if max(results.values()) < 0.25 else "FAIL"
+        print(f"\nCeiling: 0.25 | Verdict: {verdict}")
 
     elif args.command == "tasks":
-        TASKS = {
-            "brief": 0.10, "extraction": 0.20, "validation": 0.20,
-            "match": 0.15, "diff": 0.15, "lifecycle": 0.20,
-        }
-        print("Task types (GRW mixture):")
-        for name, weight in TASKS.items():
-            print(f"  {name:<15} {weight:>5.0%}")
-        print(f"  {'Total':<15} {sum(TASKS.values()):>5.0%}")
+        tasks = load_tasks()
+        counts = defaultdict(int)
+        for t in tasks:
+            counts[t.data.name.split("/")[-1]] += 1
+        total = len(tasks)
+        print(f"Task types ({total} tasks):")
+        for name, count in sorted(counts.items()):
+            print(f"  {name:<15} {count:>3} tasks ({count/total:.0%})")
+
+    elif args.command == "serve":
+        from prime_grw.server import create_app
+        import uvicorn
+        app = create_app(evaluate_fn=evaluate)
+        print(f"prime-grw serving on {args.host}:{args.port}")
+        uvicorn.run(app, host=args.host, port=args.port)
 
     else:
         parser.print_help()
 
 
 if __name__ == "__main__":
-    main()
+    cli_main()
