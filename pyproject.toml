@@ -1,0 +1,42 @@
+[project]
+name = "prime-grw"
+version = "0.6.0"
+description = "GRW operations evaluation suite — standalone installable package for match, validation, diff, extraction, brief, and lifecycle tasks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+tags = ["single-turn", "ops", "growth", "eval", "train", "multi-task"]
+dependencies = [
+    "verifiers>=0.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+full = [
+    "verifiers>=0.2.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "datasets",
+]
+
+[project.scripts]
+prime-grw = "prime_grw.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["prime_grw"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"prime_grw/brief_rubric.toml" = "prime_grw/brief_rubric.toml"
+
+[tool.verifiers.eval]
+num_examples = 20
+rollouts_per_example = 3

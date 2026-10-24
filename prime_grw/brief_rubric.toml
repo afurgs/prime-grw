@@ -1,0 +1,40 @@
+# Rubric for the prime-grw ops-brief judge (SCORER_V03_DESIGN §4.5c).
+# Forced-choice criteria, ordered worst → best; graded against the row's
+# verified fact sheet (TaskData.fact_sheet via answer_field). Every heavy
+# criterion is correct-statement-in-context, not token-presence.
+
+[[criteria]]
+name = "supply_accuracy"
+text = "The Supply section states the live-GPU and unearmarked-supply position consistent with the reference fact sheet — the numbers must be asserted about the right things, not merely appear somewhere in the text."
+choices = ["wrong", "partial", "correct"]
+weight = 0.25
+
+[[criteria]]
+name = "demand_accuracy"
+text = "The Demand/pipeline section correctly characterizes the deal counts and urgency given in the fact sheet."
+choices = ["wrong", "partial", "correct"]
+weight = 0.2
+
+[[criteria]]
+name = "priority_actions"
+text = "The brief names at least one specific match/earmark action consistent with the fact sheet's earmark candidates, naming both the supply deal and the demand deal (or vendor and client)."
+choices = ["none", "generic", "specific"]
+weight = 0.25
+
+[[criteria]]
+name = "risk_gaps"
+text = "The brief identifies the nearest cluster expiry and/or the unearmarked-supply exposure with the correct date or number from the fact sheet."
+choices = ["none", "mentioned", "correct"]
+weight = 0.15
+
+[[criteria]]
+name = "no_fabrication"
+text = "The brief asserts no vendor, client, count, or date that is absent from the fact sheet. Any invented entity or figure means 'fabricates'."
+choices = ["fabricates", "clean"]
+weight = 0.1
+
+[[criteria]]
+name = "readable_structure"
+text = "The brief is coherent prose/sections an operations lead could act on — not keyword lists, number dumps, or template filler."
+choices = ["no", "yes"]
+weight = 0.05
